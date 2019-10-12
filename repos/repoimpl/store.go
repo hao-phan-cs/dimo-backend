@@ -11,6 +11,10 @@ type StoreRepoImpl struct {
 	db *sql.DB
 }
 
+func (s *StoreRepoImpl) UpdateByID(store *models.Store) error {
+	panic("implement me")
+}
+
 func (s *StoreRepoImpl) CountByBrand(brandId int64) (int, error) {
 	var count int
 	err := s.db.QueryRow(`

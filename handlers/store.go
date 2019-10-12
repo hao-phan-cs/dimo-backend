@@ -5,6 +5,7 @@ import (
 	"dimo-backend/drivers/recsys"
 	"dimo-backend/models"
 	"dimo-backend/models/api/store_api"
+	"dimo-backend/repos"
 	"dimo-backend/repos/repoimpl"
 	. "dimo-backend/utils"
 	"fmt"
@@ -15,6 +16,14 @@ import (
 	"strconv"
 	"time"
 )
+
+var allStores = make([]*models.Store, 0)
+var storeRepo repos.StoreRepo
+
+func init() {
+	storeRepo = repoimpl.NewStoreRepo(postgres.ConnectAsDefault().SQL)
+	allStores, _ = storeRepo.GetAll()
+}
 
 func distance(lat1, lng1, lat2, lng2 float32) float64 {
 	const PI float64 = 3.141592653589793
@@ -40,24 +49,27 @@ func distance(lat1, lng1, lat2, lng2 float32) float64 {
 
 func sortForUser(stores []*store_api.ResponseData) []*store_api.ResponseData {
 	sort.SliceStable(stores, func(i, j int) bool {
-		return stores[i].Distance < stores[j].Distance
+		if stores[i].RecommendRank == stores[j].RecommendRank {
+			return stores[i].Distance < stores[j].Distance
+		}
+		return stores[i].RecommendRank < stores[j].RecommendRank
 	})
 
 	brandDict := map[string]bool{}
 	firstPart := make([]*store_api.ResponseData, 0)
 	secondPart := make([]*store_api.ResponseData, 0)
 	for _, store := range stores {
-		if _, ok := brandDict[store.BrandName]; !ok {
+		if _, ok := brandDict[store.BrandName]; !ok && len(brandDict) < 10 {
 			firstPart = append(firstPart, store)
 			brandDict[store.BrandName] = true
 		} else {
 			secondPart = append(secondPart, store)
 		}
 	}
+	if len(secondPart) > 1 {
+		secondPart = sortForUser(secondPart)
+	}
 
-	sort.SliceStable(firstPart, func(i, j int) bool {
-		return firstPart[i].RecommendRank < firstPart[j].RecommendRank
-	})
 	for _, store := range secondPart {
 		firstPart = append(firstPart, store)
 	}
@@ -81,11 +93,9 @@ var GetStoreById = func(w http.ResponseWriter, r *http.Request) {
 		Respond(w, Message(http.StatusBadRequest, "Invalid Store ID"))
 		return
 	}
-	storeRepo := repoimpl.NewStoreRepo(postgres.ConnectAsDefault().SQL)
 	store, err := storeRepo.GetByID(int64(storeId))
-	if err != nil {
+	if store == nil || err != nil {
 		Respond(w, Message(http.StatusNotFound, "Store not found"))
-		panic(err)
 		return
 	}
 	data := store_api.ResponseData{
@@ -126,12 +136,7 @@ var GetStoresByDistLimit = func(w http.ResponseWriter, r *http.Request) {
 		Respond(w, Message(http.StatusBadRequest, "Invalid User's longitude"))
 		return
 	}
-	storeRepo := repoimpl.NewStoreRepo(postgres.ConnectAsDefault().SQL)
-	stores, err := storeRepo.GetAll()
-	if err != nil {
-		Respond(w, Message(http.StatusNotFound, "Store not found"))
-		return
-	}
+	stores := allStores
 	brandRepo := repoimpl.NewBrandRepo(postgres.ConnectAsDefault().SQL)
 	brandNameToID := map[string]int64{}
 	brandIds := make([]int64, 0)
@@ -165,7 +170,6 @@ var GetStoresByDistLimit = func(w http.ResponseWriter, r *http.Request) {
 			finalStores = append(finalStores, &cvtStore)
 		}
 	}
-	fmt.Println(brandIds)
 
 	brandRank := map[int64]int{}
 	userId, err := strconv.Atoi(params["user_id"])
@@ -184,8 +188,6 @@ var GetStoresByDistLimit = func(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		fmt.Println(err)
-	} else {
-		fmt.Println(brandIds)
 	}
 
 	for _, store := range finalStores {
@@ -193,66 +195,8 @@ var GetStoresByDistLimit = func(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalStores = sortForUser(finalStores)
-	var message = Message(http.StatusOK, "Stores found")
+	var message= Message(http.StatusOK, "Stores found")
 	message["process_time"] = float64(time.Now().UnixNano()-startTime.UnixNano()) / 1000000000
-	message["data"] = finalStores
-	Respond(w, message)
-}
-
-var GetNearestStoresBy = func(w http.ResponseWriter, r *http.Request) {
-
-	// key: category or brand
-	params := mux.Vars(r)
-	userLat, err := strconv.ParseFloat(params["lat"], 32)
-	if err != nil {
-		Respond(w, Message(http.StatusBadRequest, "Invalid User's latitude"))
-		return
-	}
-	userLong, err := strconv.ParseFloat(params["long"], 32)
-	if err != nil {
-		Respond(w, Message(http.StatusBadRequest, "Invalid User's longitude"))
-		return
-	}
-	key := params["key"]
-	value := params["value"]
-	limit, _ := strconv.Atoi(params["limit"])
-	storeRepo := repoimpl.NewStoreRepo(postgres.ConnectAsDefault().SQL)
-	stores := make([]*models.Store, 0)
-	if key == "brand" {
-		stores, err = storeRepo.GetByBrandName(value)
-		if err != nil {
-			Respond(w, Message(http.StatusNotFound, "Brand not found"))
-			return
-		}
-	} else if key == "category" {
-		stores, err = storeRepo.GetByCategory(value)
-		if err != nil {
-			Respond(w, Message(http.StatusNotFound, "Category not found"))
-			return
-		}
-	} else {
-		Respond(w, Message(http.StatusNotFound, "Invalid Request Key"))
-		return
-	}
-	stores = stores[:limit]
-	var message = Message(http.StatusOK, "Store found")
-
-	finalStores := make([]*store_api.ResponseData, 0)
-	for _, store := range stores {
-		cvtStore := store_api.ResponseData{
-			ID:            store.ID,
-			BrandName:     store.BrandName,
-			SubName:       store.SubName,
-			LogoUrl:       store.LogoUrl.String,
-			Address:       store.Address,
-			Distance:      distance(store.Latitude, store.Longitude, float32(userLat), float32(userLong)),
-			RecommendRank: 0,
-			AvgRating:     store.AvgRating,
-			NumRating:     store.NumRating,
-		}
-		finalStores = append(finalStores, &cvtStore)
-	}
-
 	message["data"] = finalStores
 	Respond(w, message)
 }
